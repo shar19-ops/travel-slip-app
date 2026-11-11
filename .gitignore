@@ -1,0 +1,5 @@
+*.json.bak
+/data/
+# 実データ（保存した伝票JSON）はコミットしない
+出張旅費伝票_*.json
+tools/out/

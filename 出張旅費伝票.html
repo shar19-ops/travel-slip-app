@@ -1,0 +1,1663 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>出張旅費伝票 入力</title>
+<link rel="icon" type="image/png" sizes="48x48" href="icons/favicon-48.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0e5f8f">
+<script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script src="https://unpkg.com/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
+<script src="https://unpkg.com/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+<script>
+/*
+ * date-stamp.js — 丸型デート印（日付印）描画ライブラリ（このHTMLに埋め込み・単体で動作）
+ * 使い方:
+ *   // Canvas（画面プレビュー）への描画。cx,cy は中心座標（円の中心）
+ *   DateStamp.draw(ctx, cx, cy, { name: "佐藤", date: new Date(), color: "red", radius: 50 });
+ *
+ *   // pdf-lib の PDFPage への焼き込み。font は pdf-lib で embed した PDFFont（日本語フォント推奨）
+ *   DateStamp.drawToPdf(page, cx, cy, { name: "佐藤", date: new Date(), color: "red", radius: 50, font: jpFont });
+ */
+(function (root, factory) {
+  if (typeof module === "object" && module.exports) {
+    module.exports = factory();
+  } else {
+    root.DateStamp = factory();
+  }
+})(typeof self !== "undefined" ? self : this, function () {
+  "use strict";
+
+  var COLORS = {
+    black: { r: 0, g: 0, b: 0 },
+    red: { r: 0.72, g: 0.06, b: 0.06 }
+  };
+
+  function resolveColor(name) {
+    return COLORS[name] || COLORS.red;
+  }
+
+  function pad2(n, doPad) {
+    return doPad ? String(n).padStart(2, "0") : String(n);
+  }
+
+  function toYMD(date) {
+    if (date instanceof Date) {
+      return { y: date.getFullYear(), m: date.getMonth() + 1, d: date.getDate() };
+    }
+    if (typeof date === "string") {
+      var dt = new Date(date);
+      return { y: dt.getFullYear(), m: dt.getMonth() + 1, d: dt.getDate() };
+    }
+    if (date && typeof date === "object") {
+      return { y: date.year, m: date.month, d: date.day };
+    }
+    var now = new Date();
+    return { y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate() };
+  }
+
+  function formatDate(date, options) {
+    var ymd = toYMD(date);
+    var pad = !!options.padZero;
+    var m = pad2(ymd.m, pad);
+    var d = pad2(ymd.d, pad);
+    switch (options.dateFormat) {
+      case "kanji":
+        return ymd.y + "年" + m + "月" + d + "日";
+      case "slash":
+        return ymd.y + "/" + m + "/" + d;
+      case "yy-slash": // "26/6/25"（年を2桁表記）
+        return String(ymd.y).slice(-2) + "/" + m + "/" + d;
+      case "dot":
+        return ymd.y + "." + m + "." + d;
+      default: // "dot-space"（サンプルの "2026. 6. 25" 形式）
+        return ymd.y + ". " + m + ". " + d;
+    }
+  }
+
+  function splitName(options) {
+    if (options.nameTop != null || options.nameBottom != null) {
+      return { top: options.nameTop || "", bottom: options.nameBottom || "" };
+    }
+    var name = (options.name || "").trim();
+    if (!name) return { top: "", bottom: "" };
+    var half = Math.ceil(name.length / 2);
+    return { top: name.slice(0, half), bottom: name.slice(half) };
+  }
+
+  // 円を3段（上段=名前/下段=名前/中段=日付）に分ける共通レイアウト計算
+  function computeLayout(options) {
+    var radius = options.radius || 50;
+    var bandRatio = options.bandRatio != null ? options.bandRatio : 1 / 3;
+    var offset = radius * bandRatio; // 中心から仕切り線までの距離
+    var chordHalf = Math.sqrt(Math.max(radius * radius - offset * offset, 0));
+    var names = splitName(options);
+    return {
+      radius: radius,
+      offset: offset,
+      chordHalf: chordHalf,
+      borderWidth: options.borderWidth || Math.max(radius * 0.04, 1.5),
+      color: resolveColor(options.color),
+      nameTop: names.top,
+      nameBottom: names.bottom,
+      dateText: formatDate(options.date, options),
+      nameFontSize: options.nameFontSize || radius * 0.4,
+      dateFontSize: options.dateFontSize || radius * 0.32,
+      fontFamily: options.fontFamily || '"Meiryo","Yu Gothic","MS Gothic",sans-serif'
+    };
+  }
+
+  function measure(options) {
+    var radius = options.radius || 50;
+    return { width: radius * 2, height: radius * 2, radius: radius };
+  }
+
+  // ---- Canvas描画（画面プレビュー用、原点は左上・Y下向き） ----
+  function draw(ctx, cx, cy, options) {
+    var L = computeLayout(options || {});
+    var css = "rgb(" + Math.round(L.color.r * 255) + "," + Math.round(L.color.g * 255) + "," + Math.round(L.color.b * 255) + ")";
+
+    ctx.save();
+    ctx.strokeStyle = css;
+    ctx.fillStyle = css;
+    ctx.lineWidth = L.borderWidth;
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, L.radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (L.nameTop || L.nameBottom) {
+      ctx.beginPath();
+      ctx.moveTo(cx - L.chordHalf, cy - L.offset);
+      ctx.lineTo(cx + L.chordHalf, cy - L.offset);
+      ctx.moveTo(cx - L.chordHalf, cy + L.offset);
+      ctx.lineTo(cx + L.chordHalf, cy + L.offset);
+      ctx.stroke();
+    }
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    if (L.nameTop) {
+      ctx.font = "bold " + L.nameFontSize + "px " + L.fontFamily;
+      ctx.fillText(L.nameTop, cx, cy - (L.radius + L.offset) / 2);
+    }
+    if (L.nameBottom) {
+      ctx.font = "bold " + L.nameFontSize + "px " + L.fontFamily;
+      ctx.fillText(L.nameBottom, cx, cy + (L.radius + L.offset) / 2);
+    }
+
+    ctx.font = "bold " + L.dateFontSize + "px " + L.fontFamily;
+    ctx.fillText(L.dateText, cx, cy);
+
+    ctx.restore();
+  }
+
+  // ---- pdf-lib描画（PDF焼き込み用、原点は左下・Y上向き） ----
+  // options.font は pdf-lib で embedFont した PDFFont を渡すこと（日本語を含む場合は日本語フォント必須）
+  function drawToPdf(page, cx, cy, options) {
+    var L = computeLayout(options || {});
+    var PDFLib = (typeof window !== "undefined" && window.PDFLib) || (typeof self !== "undefined" && self.PDFLib);
+    if (!PDFLib) throw new Error("DateStamp.drawToPdf: pdf-lib (global PDFLib) が見つかりません。先に pdf-lib を読み込んでください。");
+    var font = options.font;
+    if (!font) throw new Error("DateStamp.drawToPdf: options.font (embedFont済みのPDFFont) を指定してください。");
+
+    var color = PDFLib.rgb(L.color.r, L.color.g, L.color.b);
+
+    page.drawCircle({ x: cx, y: cy, size: L.radius, borderColor: color, borderWidth: L.borderWidth });
+
+    if (L.nameTop || L.nameBottom) {
+      page.drawLine({ start: { x: cx - L.chordHalf, y: cy + L.offset }, end: { x: cx + L.chordHalf, y: cy + L.offset }, thickness: L.borderWidth, color: color });
+      page.drawLine({ start: { x: cx - L.chordHalf, y: cy - L.offset }, end: { x: cx + L.chordHalf, y: cy - L.offset }, thickness: L.borderWidth, color: color });
+    }
+
+    function centerText(text, size, centerX, centerY) {
+      var w = font.widthOfTextAtSize(text, size);
+      page.drawText(text, { x: centerX - w / 2, y: centerY - size * 0.35, size: size, font: font, color: color });
+    }
+
+    if (L.nameTop) centerText(L.nameTop, L.nameFontSize, cx, cy + (L.radius + L.offset) / 2);
+    if (L.nameBottom) centerText(L.nameBottom, L.nameFontSize, cx, cy - (L.radius + L.offset) / 2);
+    centerText(L.dateText, L.dateFontSize, cx, cy);
+  }
+
+  return {
+    draw: draw,
+    drawToPdf: drawToPdf,
+    measure: measure,
+    formatDate: formatDate
+  };
+});
+</script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Meiryo", "Yu Gothic", "MS Gothic", sans-serif; background: #eef5f9; color: #1a2630; font-size: 15px; }
+
+  html { scroll-padding-top: 90px; } /* Tab移動やスクロールで入力欄が固定ヘッダーの裏に隠れないように */
+  header { background: #0e5f8f; color: white; padding: 10px 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 6px rgba(0,0,0,0.25); }
+  header h1 { font-size: 20px; font-weight: 700; }
+  .app-version { font-size: 12px; font-weight: 400; color: rgba(255,255,255,0.75); vertical-align: middle; margin-left: 4px; }
+  header span { font-size: 13px; opacity: 0.8; }
+
+  .container { max-width: 1080px; margin: 0 auto; padding: 16px; }
+
+  .card { background: white; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.12); margin-bottom: 16px; overflow: hidden; }
+  .card-header { background: #e3f1f9; padding: 10px 16px; font-weight: 700; font-size: 13px; color: #0e5f8f; border-bottom: 1px solid #c3dff0; letter-spacing: 0.05em; }
+
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: #4a5a66; font-weight: 600; }
+  .field input, .field select {
+    border: 1px solid #c3d4df; border-radius: 5px; padding: 9px 10px;
+    font-size: 14px; font-family: inherit; background: #f9fcfe;
+    transition: border-color 0.15s;
+  }
+  .field input:focus, .field select:focus {
+    outline: none; border-color: #2a86c0; background: #fff;
+    box-shadow: 0 0 0 3px rgba(42,134,192,0.15);
+  }
+  .field input[type="number"] { text-align: right; }
+
+  .sep { margin-top: 18px; color: #4a5a66; }
+  .btn-calendar {
+    margin-top: 18px;
+    width: 34px; height: 34px;
+    border: 1px solid #c3d4df;
+    border-radius: 8px;
+    background: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .btn-calendar:hover { background: #eef6fb; }
+  .date-picker-hidden { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; border: none; }
+
+  /* 明細テーブル */
+  .detail-table-wrap { overflow-x: auto; }
+  table.detail { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.detail th { background: #e3f1f9; color: #0e5f8f; font-weight: 700; padding: 8px 6px; border: 1px solid #c3dff0; text-align: center; white-space: nowrap; }
+  table.detail td { border: 1px solid #dceaf2; padding: 4px; vertical-align: middle; }
+  table.detail tr:nth-child(even) td { background: #f9fcfe; }
+  table.detail td input, table.detail td select, table.detail td textarea {
+    width: 100%; border: none; background: transparent; padding: 5px 4px;
+    font-size: 13px; font-family: inherit;
+  }
+  table.detail td textarea { resize: none; line-height: 1.3; }
+  table.detail td input:focus, table.detail td select:focus, table.detail td textarea:focus {
+    outline: 1px solid #2a86c0; border-radius: 3px; background: #fffbe6;
+  }
+  table.detail td.row-no { text-align: center; font-size: 13px; color: #4a5a66; font-weight: 600; }
+  table.detail td.kind-label { font-weight: 600; color: #33424d; white-space: nowrap; padding-left: 8px; }
+  table.detail td.amount-cell input, table.detail td.calc { text-align: right; }
+  table.detail td.calc { padding-right: 10px; color: #33424d; }
+  table.detail tr.sum-row td { background: #e3f1f9; font-weight: 700; padding: 8px 10px; color: #0e5f8f; }
+  table.detail input[type="number"] { text-align: right; }
+  .account-cell { position: relative; min-width: 150px; }
+  .account-cell select.account-select {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; cursor: pointer; padding: 0;
+  }
+  .account-cell .account-display {
+    font-size: 13px; line-height: 1.35; min-height: 2.7em;
+    display: flex; flex-direction: column; justify-content: center;
+    pointer-events: none; padding: 2px 6px;
+    border: 1px solid #c3d4df; border-radius: 5px; background: #f9fcfe;
+  }
+  .account-cell .account-display span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .account-cell .acc-code { color: #5a6a75; font-size: 12px; }
+  .grand-total { display: flex; justify-content: flex-end; gap: 28px; flex-wrap: wrap; padding: 12px 16px; background: #e3f1f9; font-weight: 700; color: #0e5f8f; }
+  .grand-total b { font-size: 17px; }
+
+  .tax-select { width: 100%; border: none; background: transparent; padding: 4px 2px; font-size: 13px; }
+
+  .btn-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+  header .btn-bar button { padding: 7px 14px; font-size: 13px; font-weight: 600; border-radius: 6px; white-space: nowrap; }
+  header .btn-secondary { background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.45); }
+  header .btn-secondary:hover { background: rgba(255,255,255,0.28); }
+  header .btn-primary { background: white; color: #0e5f8f; font-weight: 700; }
+  header .btn-primary:hover { background: #e3f1f9; }
+  header .btn-primary:active { background: #cfe6f3; }
+  #acc-status:empty { display: none; }
+  /* 画面が狭いときは固定ヘッダーが場所を取りすぎないように詰める */
+  @media (max-width: 1180px) {
+    header > span { display: none; }
+  }
+  @media (max-width: 900px) {
+    header h1 { flex: 1 1 0; min-width: 0; }
+    header .acc-badge { order: 1; }
+    header .btn-bar { order: 2; flex-basis: 100%; margin-left: 0; }
+    header #status { order: 3; }
+  }
+  @media (max-width: 640px) {
+    html { scroll-padding-top: 120px; }
+    header { padding: 8px 12px; gap: 6px 8px; }
+    header h1 { font-size: 15px; }
+    header .btn-bar { gap: 6px; flex-wrap: nowrap; }
+    header .btn-bar button { flex: 1 1 auto; padding: 6px 6px; font-size: 12px; }
+    header .btn-acc { padding: 5px 8px; font-size: 12px; }
+  }
+  .btn-primary {
+    background: #0e5f8f; color: white; border: none; border-radius: 8px;
+    padding: 14px 40px; font-size: 16px; font-weight: 700; cursor: pointer;
+    font-family: inherit; transition: background 0.15s;
+  }
+  .btn-primary:hover { background: #1672a8; }
+  .btn-secondary {
+    background: white; color: #0e5f8f; border: 2px solid #0e5f8f; border-radius: 8px;
+    padding: 14px 28px; font-size: 15px; font-weight: 600; cursor: pointer;
+    font-family: inherit; transition: background 0.15s;
+  }
+  .btn-secondary:hover { background: #e3f1f9; }
+  .btn-small { font-size: 12px; padding: 4px 10px; border-width: 1.5px; }
+  .btn-file {
+    background: #eef6fb; color: #0e5f8f; border: 1px solid #c3dff0;
+    border-radius: 6px; padding: 9px 16px; font-size: 14px; font-weight: 600;
+    cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-file:hover { background: #dbedf7; }
+  .btn-file-del { background: #fff2f2; color: #c0392b; border-color: #f0c0c0; }
+  .btn-file-del:hover { background: #ffe0e0; }
+
+  #status { flex-basis: 100%; text-align: center; font-size: 13px; color: #4a5a66; background: white; border-radius: 4px; padding: 4px 8px; }
+  #status:empty { display: none; }
+  .notice { background: #fff8e1; border: 1px solid #f0d98c; border-radius: 6px; padding: 8px 14px; font-size: 12px; color: #6b5a1e; margin-bottom: 16px; }
+  .status-ok { color: #1a7a4a !important; }
+  .status-err { color: #c0392b !important; }
+
+  .form-row { display: flex; flex-wrap: wrap; align-items: end; gap: 16px 20px; padding: 16px; }
+  .form-row + .form-row { padding-top: 0; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+  /* 印刷：PDFを画像化して#print-areaに描画し、それだけを印刷する */
+  #print-area { display: none; }
+  @media print {
+    /* 余白0で実寸印刷（用紙端の余白はPDF側で確保済み。ここで縮めると伝票が小さくなる） */
+    @page { size: A4; margin: 0; }
+    body > *:not(#print-area) { display: none !important; }
+    #print-area { display: block; margin: 0; padding: 0; }
+    #print-area canvas { display: block; margin: 0; padding: 0; } /* 大きさはprintViaCanvasで指定（A4は210×296.8mm） */
+  }
+
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.52);
+    display: flex; align-items: center; justify-content: center; z-index: 1000;
+  }
+  .modal-box {
+    background: white; border-radius: 12px; padding: 28px 32px; width: 320px; max-width: calc(100vw - 32px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.25); display: flex; flex-direction: column; gap: 14px;
+  }
+  .modal-box h2 { font-size: 17px; color: #0e5f8f; }
+  .modal-box p  { font-size: 13px; color: #4a5a66; }
+  .modal-box input[type="text"], .modal-box input[type="password"] {
+    border: 1px solid #c3d4df; border-radius: 5px;
+    padding: 9px 10px; font-size: 14px; font-family: inherit; min-width: 0;
+  }
+  .modal-btn-row { display: flex; gap: 10px; justify-content: flex-end; }
+  .modal-btn-row button, .modal-box .btn-login, .modal-box .btn-cancel {
+    border: none; border-radius: 6px; padding: 9px 20px;
+    font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .btn-login  { background: #0e5f8f; color: white; }
+  .btn-login:hover  { background: #1672a8; }
+  .btn-cancel { background: #e8ecef; color: #445; }
+  .btn-cancel:hover { background: #d6dde2; }
+
+  /* 経理担当者認証 ─────────────────────────── */
+  .acc-badge { display: flex; align-items: center; gap: 10px; }
+  .btn-acc {
+    background: rgba(255,255,255,0.15); color: white;
+    border: 1px solid rgba(255,255,255,0.45); border-radius: 6px;
+    padding: 7px 14px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit; white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .btn-acc:hover { background: rgba(255,255,255,0.28); }
+  #acc-status { font-size: 12px; color: #fff; opacity: 0.85; min-width: 80px; }
+  #acc-pw-error { color: #c0392b; font-size: 12px; display: none; }
+  #acc-pw { width: 100%; font-size: 15px; padding: 10px 12px; }
+
+  /* 経理担当者専用フィールド（伝票の網掛け欄）: ロック時の網掛け */
+  [data-acc] { position: relative; }
+  body:not(.acc-mode) [data-acc] input,
+  body:not(.acc-mode) [data-acc] select,
+  body:not(.acc-mode) table.detail td[data-acc] input,
+  body:not(.acc-mode) table.detail td[data-acc] select {
+    pointer-events: none; color: #99a !important; background: #edf1f3 !important;
+  }
+  body:not(.acc-mode) [data-acc] .account-display { color: #99a; background: #edf1f3; }
+  body:not(.acc-mode) [data-acc].btn-calendar,
+  body:not(.acc-mode) [data-acc].btn-secondary {
+    pointer-events: none; opacity: 0.5;
+  }
+</style>
+</head>
+<body>
+
+<div id="print-area"></div>
+
+<header>
+  <h1>出張旅費伝票 <span class="app-version">v20261111a</span></h1>
+  <span>入力フォーム</span>
+  <div class="btn-bar">
+    <button class="btn-secondary" onclick="loadData()">📂 読み込む</button>
+    <button class="btn-secondary" onclick="saveData()">💾 保存</button>
+    <button class="btn-secondary" onclick="clearForm()">クリア</button>
+    <button class="btn-primary" onclick="printPDF()">🖨 印刷 / PDF出力</button>
+  </div>
+  <div class="acc-badge">
+    <span id="acc-status"></span>
+    <button id="acc-btn" class="btn-acc" onclick="toggleAccMode()">🔒 経理担当者</button>
+  </div>
+  <div id="status"></div>
+</header>
+
+<!-- 経理担当者パスワードモーダル -->
+<div id="acc-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h2>🔐 経理担当者ログイン</h2>
+    <p>経理担当者専用フィールドのロックを解除します。<br>パスワードを入力してください。</p>
+    <input type="password" id="acc-pw" placeholder="パスワード">
+    <p id="acc-pw-error">パスワードが違います</p>
+    <div class="modal-btn-row">
+      <button class="btn-cancel" onclick="closeAccModal()">キャンセル</button>
+      <button class="btn-login" onclick="loginAcc()">ログイン</button>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="notice">※ 環境依存文字（㈱、㈲、丸囲み数字、ローマ数字、特殊記号など）は入力しないでください。PDF出力時に正しく表示されない場合があります。<br>※ 灰色の欄（伝票の網掛け部分）は経理担当者が記入します。</div>
+
+  <!-- ヘッダー情報 -->
+  <div class="card">
+    <div class="card-header">▌ ヘッダー情報</div>
+    <div class="form-row">
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="margin-top:18px; font-size:13px; color:#4a5a66;">日付</span>
+        <div class="field"><label>年</label><div data-acc><input type="number" id="date_year" style="width:72px;" placeholder="2026"></div></div>
+        <span class="sep">年</span>
+        <div class="field"><label>月</label><div data-acc><input type="number" id="date_month" style="width:60px;" min="1" max="12" placeholder="1"></div></div>
+        <span class="sep">月</span>
+        <div class="field"><label>日</label><div data-acc><input type="number" id="date_day" style="width:60px;" min="1" max="31" placeholder="1"></div></div>
+        <span class="sep">日</span>
+        <button type="button" class="btn-calendar" data-acc title="カレンダーから選択" onclick="openDatePicker('date_year','date_month','date_day','date_picker_main')">📅</button>
+        <input type="date" id="date_picker_main" class="date-picker-hidden" onchange="applyDatePicker(this,'date_year','date_month','date_day')">
+      </div>
+      <div class="field" style="flex:0 0 100px;">
+        <label>事業所CD</label>
+        <input type="text" id="office_code" placeholder="" readonly style="background:#eef3f6; color:#445; width:100%;">
+      </div>
+      <div class="field" style="flex:1 1 160px; min-width:140px;">
+        <label>事業所名</label>
+        <select id="office_name" onchange="onOfficeChange()" style="width:100%;">
+          <option value=""></option>
+          <option value="本店">本店</option>
+          <option value="東関東支店">東関東支店</option>
+          <option value="横浜支店">横浜支店</option>
+          <option value="大阪支店">大阪支店</option>
+          <option value="名古屋支店">名古屋支店</option>
+          <option value="仙台支店">仙台支店</option>
+          <option value="北関東支店">北関東支店</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field account-cell" data-acc style="flex:1 1 200px;">
+        <label style="display:flex; justify-content:space-between;">借方科目 <button type="button" class="btn-secondary btn-small" data-acc style="padding:0 8px;" onclick="openAccountManager()">📋 科目追加</button></label>
+        <div style="position:relative;">
+          <select id="account" class="account-select" onchange="renderAccountDisplay('account')"></select>
+          <div class="account-display"><span class="acc-name">&nbsp;</span><span class="acc-code"></span></div>
+        </div>
+      </div>
+      <div class="field" style="flex:0 0 90px;">
+        <label>税</label>
+        <div data-acc><select id="tax" style="width:100%;"></select></div>
+      </div>
+      <div class="field" style="flex:1 1 130px; min-width:110px;">
+        <label>工番</label>
+        <input type="text" id="job_no" placeholder="例：25-0123" style="width:100%;">
+      </div>
+      <div class="field" style="flex:0 0 80px;">
+        <label>区分</label>
+        <input type="text" id="category" placeholder="" style="width:100%;" oninput="this.value = toHalfWidthAlnum(this.value)">
+      </div>
+      <div class="field" style="flex:1 1 140px; min-width:120px;">
+        <label>伝票番号</label>
+        <div data-acc><input type="text" id="voucher_no" placeholder="" style="width:100%;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 件名・行先 -->
+  <div class="card">
+    <div class="card-header">▌ 件名・行先／用件</div>
+    <div class="form-row">
+      <div class="field" style="flex:1 1 300px;">
+        <label>件名</label>
+        <input type="text" id="subject" placeholder="例：○○ビル電気設備工事" style="width:100%;">
+      </div>
+      <div class="field" style="flex:1 1 300px;">
+        <label>行先／用件</label>
+        <input type="text" id="destination" placeholder="例：仙台市　現場打合せ" style="width:100%;">
+      </div>
+    </div>
+  </div>
+
+  <!-- 明細 -->
+  <div class="card">
+    <div class="card-header" style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+      <span>▌ 交通費（最大5行）／宿泊費・日当など</span>
+      <button type="button" class="btn-secondary btn-small" data-acc onclick="openExpenseCdManager()">📋 経費CD管理</button>
+    </div>
+    <div class="two-col">
+      <div class="detail-table-wrap">
+        <table class="detail">
+          <thead>
+            <tr>
+              <th style="width:28px;">№</th>
+              <th style="width:54px;">月</th>
+              <th style="width:54px;">日</th>
+              <th style="min-width:160px;">摘要（区間・交通機関など）</th>
+              <th style="width:100px;">交通費</th>
+              <th style="width:84px;">経費CD</th>
+            </tr>
+          </thead>
+          <tbody id="fare-tbody"></tbody>
+          <tbody>
+            <tr class="sum-row"><td colspan="4" style="text-align:right;">交通費 計</td><td class="calc" id="fare-total">￥0</td><td></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="detail-table-wrap">
+        <table class="detail">
+          <thead>
+            <tr>
+              <th style="min-width:110px;">種別</th>
+              <th style="width:64px;">日数</th>
+              <th style="width:96px;">単価</th>
+              <th style="width:100px;">金額</th>
+            </tr>
+          </thead>
+          <tbody id="kind-tbody"></tbody>
+          <tbody>
+            <tr class="sum-row"><td colspan="3" style="text-align:right;">小　計</td><td class="calc" id="kind-total">￥0</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="grand-total"><span>合計金額（交通費 計＋小計）</span><b id="grand-total">￥0</b></div>
+  </div>
+
+  <!-- 添付ファイル -->
+  <div class="card">
+    <div class="card-header">▌ 添付ファイル（PDF・任意）</div>
+    <div style="padding:14px 16px;">
+      <input type="file" id="attached-file-input" accept="application/pdf,.pdf" multiple style="display:none" onchange="onAttachedFilesSelected(this)">
+      <button type="button" class="btn-file" onclick="document.getElementById('attached-file-input').click()">📎 ファイルを添付</button>
+      <div id="attached-file-list"></div>
+      <p style="font-size:12px; color:#6a7a85; margin-top:8px;">※ 領収書などのPDFは、印刷／PDF出力のとき伝票の後ろに付きます。保存（💾）したファイルにも含まれます。</p>
+    </div>
+  </div>
+
+  <!-- 発行情報 -->
+  <div class="card">
+    <div class="card-header">▌ 発行情報（出張者）</div>
+    <div class="form-row">
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="margin-top:18px; font-size:13px; color:#4a5a66;">発行日</span>
+        <div class="field"><label>年</label><input type="number" id="issue_year" style="width:72px;" placeholder="2026"></div>
+        <span class="sep">年</span>
+        <div class="field"><label>月</label><input type="number" id="issue_month" style="width:60px;" min="1" max="12" placeholder="1"></div>
+        <span class="sep">月</span>
+        <div class="field"><label>日</label><input type="number" id="issue_day" style="width:60px;" min="1" max="31" placeholder="1"></div>
+        <span class="sep">日</span>
+        <button type="button" class="btn-calendar" title="カレンダーから選択" onclick="openDatePicker('issue_year','issue_month','issue_day','date_picker_issue')">📅</button>
+        <input type="date" id="date_picker_issue" class="date-picker-hidden" onchange="applyDatePicker(this,'issue_year','issue_month','issue_day')">
+      </div>
+      <div class="field" style="flex:0 0 130px;">
+        <label>社員CD</label>
+        <input type="text" id="employee_cd" placeholder="例：1234567" maxlength="7" inputmode="numeric" style="width:100%;" oninput="this.value = toHalfWidthAlnum(this.value)">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field" style="flex:0 1 130px;">
+        <label>部</label>
+        <input type="text" id="dept" placeholder="">
+      </div>
+      <div class="field" style="flex:0 1 110px;">
+        <label>課</label>
+        <input type="text" id="section" placeholder="">
+      </div>
+      <div class="field" style="flex:0 1 110px;">
+        <label>資格</label>
+        <input type="text" id="grade" placeholder="">
+      </div>
+      <div class="field" style="flex:1 1 240px;">
+        <label>出張者（苗字 名前の間にスペース）</label>
+        <input type="text" id="issuer" placeholder="例：佐藤 太郎" style="width:100%;">
+        <span id="issuer-name-error" style="display:none; font-size:11px; color:#c0392b;">苗字と名前の間にスペースを入力してください</span>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:12px; border-top:1px solid #dceaf2; margin:4px 16px 0; padding:14px 0 16px;">
+      <canvas id="stamp-preview" width="84" height="84" style="background:#f9fcfe; border:1px solid #dceaf2; border-radius:6px;"></canvas>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <span style="font-size:12px; color:#4a5a66; font-weight:600;">出張者印（デート印・苗字＋発行日。役職があれば下段に表示）</span>
+        <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+          <label style="display:flex; gap:6px; align-items:center; font-size:13px; font-weight:600;">
+            <input type="checkbox" id="stamp_enabled" checked> デート印を表示する
+          </label>
+          <label style="display:flex; gap:6px; align-items:center; font-size:13px; font-weight:600;">役職
+            <select id="issuer_title" onchange="onIssuerTitleChange()">
+              <option value="">（なし）</option>
+              <option value="副長">副長</option>
+              <option value="課長">課長</option>
+              <option value="工事長">工事長</option>
+              <option value="支店長">支店長</option>
+              <option value="部長">部長</option>
+              <option value="本部長">本部長</option>
+              <option value="取締役">取締役</option>
+              <option value="常務">常務</option>
+              <option value="本店長">本店長</option>
+            </select>
+          </label>
+          <label style="display:flex; gap:6px; align-items:center; font-size:13px; font-weight:600;"><input type="radio" name="stamp_color" value="red"> 朱（赤）</label>
+          <label style="display:flex; gap:6px; align-items:center; font-size:13px; font-weight:600;"><input type="radio" name="stamp_color" value="black" checked> 黒</label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<!-- 控え選択モーダル -->
+<div id="export-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h2 id="export-modal-title">📄 PDF出力</h2>
+    <p>控え（同じ内容をA4に上下2面で出力）を付けますか？</p>
+    <div style="display:flex; flex-direction:column; gap:10px;">
+      <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
+        <input type="radio" name="export-copy" id="export-copy-no" value="no" checked style="width:auto;">
+        控え なし（A5サイズをA4に1面出力）
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
+        <input type="radio" name="export-copy" id="export-copy-yes" value="yes" style="width:auto;">
+        控え あり（同じ内容をA4に上下2面出力）
+      </label>
+    </div>
+    <div class="modal-btn-row">
+      <button class="btn-cancel" onclick="closeExportModal()">キャンセル</button>
+      <button class="btn-login" id="export-modal-confirm-btn" onclick="confirmExport()">PDF生成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 科目／経費CD 追加・削除モーダル -->
+<div id="list-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box" style="width:400px;">
+    <h2 id="list-modal-title">📋 リスト管理</h2>
+    <div id="list-modal-extra-list" style="max-height:300px; overflow-y:auto;"></div>
+    <div id="list-modal-add-fields" style="display:flex; gap:8px;"></div>
+    <p style="font-size:11px;">※ 追加・削除した内容はこのブラウザだけに保存されます。</p>
+    <div class="modal-btn-row">
+      <button class="btn-cancel" onclick="closeListModal()">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── 埋め込みPDFテンプレート ───────────────────────────────────
+// 支払伝票PJ/素材/出張旅費伝票.svg（A5）をChromeでベクターPDF化したもの（作り方は tools/make_template.py）
+const TEMPLATE_B64 = 'JVBERi0xLjQKJcK1wrYKJSBXcml0dGVuIGJ5IE11UERGIDEuMjguMgoKMSAwIG9iago8PC9UaXRsZShyeW9oaV90cGwuaHRtbCkvQ3JlYXRvcihNb3ppbGxhLzUuMCBcKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NFwpIEFwcGxlV2ViS2l0LzUzNy4zNiBcKEtIVE1MLCBsaWtlIEdlY2tvXCkgSGVhZGxlc3NDaHJvbWUvMTU3LjAuMC4wIFNhZmFyaS81MzcuMzYpL1Byb2R1Y2VyKFNraWEvUERGIG0xNTcpL0NyZWF0aW9uRGF0ZShEOjIwMjYxMTExMDIxNjIwKzAwJzAwJykvTW9kRGF0ZShEOjIwMjYxMTExMDIxNjIwKzAwJzAwJyk+PgplbmRvYmoKCjIgMCBvYmoKPDwvVHlwZS9QYWdlL1Jlc291cmNlczw8L1Byb2NTZXRbL1BERi9UZXh0L0ltYWdlQi9JbWFnZUMvSW1hZ2VJXS9FeHRHU3RhdGU8PC9HMyAzIDAgUi9HNCA0IDAgUi9HNSA1IDAgUi9HNyA3IDAgUi9HOCA4IDAgUj4+L0ZvbnQ8PC9GNiA2IDAgUj4+Pj4vTWVkaWFCb3hbMCAuNDggNTk1LjMyIDQyMF0vQ29udGVudHMgOSAwIFIvVGFicy9TL1BhcmVudCAxMCAwIFI+PgplbmRvYmoKCjMgMCBvYmoKPDwvQ0EgMS9jYSAxL0xDIDAvTEogMC9MVyAuMi9NTCA0L1NBIHRydWUvQk0vTm9ybWFsPj4KZW5kb2JqCgo0IDAgb2JqCjw8L2NhIC4yL0JNL05vcm1hbD4+CmVuZG9iagoKNSAwIG9iago8PC9jYSAxL0JNL05vcm1hbD4+CmVuZG9iagoKNiAwIG9iago8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMC9CYXNlRm9udC9BQUFBQUErTVMtTWluY2hvL0VuY29kaW5nL0lkZW50aXR5LUgvRGVzY2VuZGFudEZvbnRzWzE0IDAgUl0vVG9Vbmljb2RlIDE1IDAgUj4+CmVuZG9iagoKNyAwIG9iago8PC9DQSAxL2NhIDEvTEMgMC9MSiAwL0xXIC40L01MIDQvU0EgdHJ1ZS9CTS9Ob3JtYWw+PgplbmRvYmoKCjggMCBvYmoKPDwvQ0EgMS9j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';
+
+// ─── 座標マップ ────────────────────────────────────────────────
+// フォーム座標＝A5用紙(595.32×419.52pt)を 793.76×559.36 とした座標（1単位=0.75pt、y は上→下に増加）。
+// x_page = 0.75 * x_form, y_page = 419.52 - 0.75 * y_form
+// 全座標はテンプレートSVGをChromeで描画し、罫線の矩形・ラベル文字の位置を実測した値。
+const OFFICE_NAME_POS = { x: 636, y: 28, w: 124 };      // 事業所名（「事業所名：」の後の下線部）
+const DATE_CELL_Y = [70.5, 84.3];                        // 上の「年 月 日」
+const DATE_POS = {
+  date_year:  { x: 70,    w: 43 },                       // 「年」(115.3-)の左
+  date_month: { x: 131,   w: 46 },                       // 「年」(-129.5)と「月」(179.1-)の間
+  date_day:   { x: 195,   w: 46 },                       // 「月」(-193.2)と「日」(242.8-)の間
+};
+const ISSUE_CELL_Y = [348.7, 364.2];                     // 下の「発行 年 月 日」
+const ISSUE_POS = {
+  issue_year:  { x: 70,  w: 43 },                        // 「年」(114.9-)の左
+  issue_month: { x: 132, w: 35 },                        // 「年」(-130.4)と「月」(169.1-)の間
+  issue_day:   { x: 186, w: 43 },                        // 「月」(-184.6)と「日」(231-)の間
+};
+const HEADER_BOX_Y = [60.86, 92.51];                     // ヘッダー右上の箱（記入欄）
+const HEADER_BOX_X = {
+  account:     { x: 256.10, x2: 392.60 }, // 借方科目
+  tax:         { x: 392.60, x2: 411.50 }, // 税
+  job_no:      { x: 411.50, x2: 509.84 }, // 工番
+  category:    { x: 509.84, x2: 567.73 }, // 区分
+  office_code: { x: 567.73, x2: 625.32 }, // 事業所CD
+  voucher_no:  { x: 625.32, x2: 762.11 }, // 伝票番号
+};
+const SUBJECT_BOX     = { x: 97.60,  x2: 357.16, yTop: 92.51, yBottom: 121.22 }; // 件名
+const DESTINATION_BOX = { x: 418.84, x2: 761.85, yTop: 92.51, yBottom: 121.60 }; // 行先／用件
+
+// 明細6行の上下境界（左：交通費の明細は1〜5行目、6行目は交通費の計。右：種別5行＋小計）
+const ROW_BOUNDS = [
+  [140.98, 171.54],
+  [171.54, 202.09],
+  [202.09, 232.65],
+  [232.65, 263.21],
+  [263.21, 293.76],
+  [293.76, 324.32],
+];
+const TOTAL_ROW_BOUNDS = [324.32, 361.01]; // 合計金額
+const COL_X = {
+  month:      { x: 34.48,  w: 31.56  }, // 月
+  day:        { x: 66.04,  w: 31.56  }, // 日
+  summary:    { x: 97.60,  w: 259.56 }, // 摘要
+  expense_cd: { x: 450.70, w: 38.65  }, // 経費CD
+  kind:       { x: 489.35, w: 77.82  }, // 種別（5行目だけ記入）
+  days:       { x: 567.17, w: 39.57  }, // 日数
+  unit:       { x: 606.74, w: 61.57  }, // 単価
+};
+// 交通費・金額の桁マス中央x（右→左: 1の位から6桁）
+const FARE_CELLS_X   = [442.91, 427.32, 411.73, 396.14, 380.55, 364.96]; // 境界 357.16-372.75-388.34-403.93-419.52-435.11-450.7
+const AMOUNT_CELLS_X = [754.06, 738.47, 722.88, 707.29, 691.70, 676.11]; // 境界 668.31-683.9-699.49-715.08-730.67-746.26-761.85
+const MAX_DIGITS = 6;
+
+// 社員CD（7マス）
+const EMPLOYEE_CD_CELLS_X = [294.32, 313.61, 332.91, 352.21, 371.51, 390.81, 410.11];
+const EMPLOYEE_CD_BOUNDS = [397.14, 428.77];
+// 合計欄の下の「(資格)」「部」「課」（部・課はラベルの左に右寄せ、資格は「(資格)」の下に中央）
+const DEPT_CELL_Y = [377.0, 393.0];
+const DEPT_POS    = { x: 482, w: 74 };   // 「部」ラベル(559.15-)の左
+const SECTION_POS = { x: 576, w: 49 };   // 「部」(-573.32)と「課」(627.97-)の間
+const GRADE_POS   = { x: 646, w: 66 };   // 「(資格)」(651.5-704.6)の下
+// 出張者（「出張者」ラベル右端 557.5、下線 y=429.2。右側はデート印の場所）
+const ISSUER_POS = { x: 564, y: 426, w: 140 };
+// 出張者印の中心（ページ座標pt）。上の部課の下線(y=394.3)をまたぎ、下の経理部枠(y=435.7)に当たらない
+// 位置・大きさ（フォーム座標 x=735, y=405、半径24）。左の「(資格)」ラベル(〜x=705)・資格の記入文字(〜x=712)とは重ならない
+const STAMP_ISSUER_CENTER = { x: 551.25, y: 115.77 };
+const STAMP_RADIUS = 18; // pt（直径約12.7mm）
+
+// 右側の種別（4つは様式に印字済み、5行目は名前を入力）
+const KINDS = ['宿泊費', '車中泊', '日当', '日帰出張', ''];
+const FARE_ROWS = 5;
+
+// ─── 事業所マスタ ─────────────────────────────────────────────
+const OFFICE_MAP = {
+  '本店':     '010',
+  '東関東支店':'020',
+  '横浜支店': '030',
+  '大阪支店': '040',
+  '名古屋支店':'050',
+  '仙台支店': '060',
+  '北関東支店':'090',
+};
+function onOfficeChange() {
+  const name = document.getElementById('office_name').value;
+  document.getElementById('office_code').value = OFFICE_MAP[name] || '';
+  redrawStampPreview();
+}
+
+function toHalfWidthAlnum(str) {
+  return str
+    .replace(/[Ａ-Ｚａ-ｚ０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/\s+/g, '');
+}
+
+function openDatePicker(yId, mId, dId, pickerId) {
+  const y = document.getElementById(yId).value || new Date().getFullYear();
+  const m = String(document.getElementById(mId).value || (new Date().getMonth() + 1)).padStart(2, '0');
+  const d = String(document.getElementById(dId).value || new Date().getDate()).padStart(2, '0');
+  const picker = document.getElementById(pickerId);
+  picker.value = `${y}-${m}-${d}`;
+  if (picker.showPicker) picker.showPicker();
+  else picker.click();
+}
+
+function applyDatePicker(picker, yId, mId, dId) {
+  const parts = picker.value.split('-');
+  if (parts.length !== 3) return;
+  document.getElementById(yId).value = parseInt(parts[0], 10);
+  document.getElementById(mId).value = parseInt(parts[1], 10);
+  document.getElementById(dId).value = parseInt(parts[2], 10);
+  if (yId === 'issue_year') redrawStampPreview();
+}
+
+// ─── リスト（科目・経費CD）の保存 ──────────────────────────────
+// 追加・削除はこのブラウザの localStorage に保存（他の伝票アプリとは別のキー）
+function loadStoredList(key) {
+  try { const a = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function saveStoredList(key, arr) {
+  try { localStorage.setItem(key, JSON.stringify(arr)); } catch (e) {}
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
+// 借方科目（「科目名\nコード」の形で保持。伝票には2段で印字）。振替伝票アプリと同じ一覧
+const ACCOUNT_BASE = [
+  '預り金\n4118-999','飲食等交際費\n7334-002','受入利息\n7811-001','買掛金\n4113-001',
+  '仮受消費税\n4911-001','仮払金\n1303-999','仮払消費税\n1501-001','完成工事未収入金\n1202-001',
+  '広告宣伝費\n7333-001','交際費\n7334-001','工事保証金\n1307-001','工事未払金\n4112-001',
+  '差入保証金\n1307-002','雑費\n7342-001','事業税等\n7339-001','事務用品費\n7317-001',
+  '従業員給与手当\n7312-001','修繕維持費\n7316-001','租税公課\n7338-001','地代家賃\n7336-001',
+  '通信交通費ガス\n7322-001','通信交通費その他\n7324-001','通信交通費通信費\n7323-001','通信交通費定期\n7321-001',
+  '電話加入権\n2251-001','動力用水光熱費\n7331-001','七十七・本店普通\n1105-321','福利厚生費\n7315-001',
+  '法定福利費\n7314-001','保険料\n7341-001','本店\n6911-001','前払費用\n1208-001',
+  '未成工事受入金\n4117-001','未成工事支出金\n1205-001','三井住友・五反田出張所\n1104-111','未払費用\n4116-001',
+];
+const ACCOUNT_EXTRA_KEY = 'travel_slip_account_extra';
+const ACCOUNT_REMOVED_KEY = 'travel_slip_account_removed';
+let ACCOUNT_EXTRA = loadStoredList(ACCOUNT_EXTRA_KEY).filter(v => typeof v === 'string' && v);
+let ACCOUNT_REMOVED = loadStoredList(ACCOUNT_REMOVED_KEY).filter(v => typeof v === 'string' && v);
+const ACCOUNT_LIST = ACCOUNT_BASE.filter(v => !ACCOUNT_REMOVED.includes(v))
+  .concat(ACCOUNT_EXTRA.filter(v => !ACCOUNT_BASE.includes(v)));
+function buildAccountOptions() {
+  return '<option value=""></option>' + ACCOUNT_LIST.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v.replace('\n','　'))}</option>`).join('');
+}
+function renderAccountDisplay(id) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  const disp = sel.nextElementSibling;
+  const [name, code] = sel.value.split('\n');
+  disp.querySelector('.acc-name').textContent = name || ' ';
+  disp.querySelector('.acc-code').textContent = code || '';
+}
+function ensureAccountOption(sel, value) {
+  if (!value || Array.from(sel.options).some(o => o.value === value)) return;
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = value.replace('\n', '　');
+  sel.appendChild(opt);
+}
+document.getElementById('account').innerHTML = buildAccountOptions();
+document.getElementById('tax').innerHTML = ['', '課込', '課抜', '非課税', '不課税', '免税', '免抜'].map(t => `<option value="${t}">${t}</option>`).join('');
+
+// 経費CD（{label, code}。伝票には「旅1」のように印字）
+const DEFAULT_EXPENSE_CD_LIST = [
+  { label: '旅',   code: '1'  },
+  { label: '事',   code: '2'  },
+  { label: '交',   code: '3'  },
+  { label: '仮',   code: '4'  },
+  { label: '地',   code: '7'  },
+  { label: '厚',   code: '9'  },
+  { label: '光',   code: '12' },
+  { label: '租',   code: '13' },
+  { label: '雑',   code: '18' },
+  { label: '材',   code: '00' },
+  { label: '法',   code: '8'  },
+  { label: '保守', code: '21' },
+  { label: '飲交', code: '27' },
+];
+const EXPENSE_CD_KEY = 'travel_slip_expense_cd_list';
+let expenseCdList = (() => {
+  const saved = loadStoredList(EXPENSE_CD_KEY).filter(e => e && typeof e.label === 'string' && typeof e.code === 'string');
+  try { if (localStorage.getItem(EXPENSE_CD_KEY) !== null) return saved; } catch (e) {}
+  return DEFAULT_EXPENSE_CD_LIST.slice();
+})();
+function expenseCdOptionsHtml(selectedValue) {
+  let html = '<option value=""></option>';
+  for (const item of expenseCdList) {
+    const sel = item.code === selectedValue ? ' selected' : '';
+    html += `<option value="${escapeHtml(item.code)}"${sel}>${escapeHtml(item.label)}（${escapeHtml(item.code)}）</option>`;
+  }
+  if (selectedValue && !expenseCdList.some(it => it.code === selectedValue)) {
+    html += `<option value="${escapeHtml(selectedValue)}" selected>${escapeHtml(selectedValue)}（削除済み）</option>`;
+  }
+  return html;
+}
+function expenseCdLabel(code) {
+  if (!code) return '';
+  const item = expenseCdList.find(it => it.code === code);
+  return item ? `${item.label}${item.code}` : code;
+}
+function refreshAllExpenseCdSelects() {
+  document.querySelectorAll('select[id^="expense_cd_"]').forEach(sel => {
+    const cur = sel.value;
+    sel.innerHTML = expenseCdOptionsHtml(cur);
+  });
+}
+
+// ─── 科目／経費CDの追加・削除モーダル ──────────────────────────
+let listModalMode = null; // 'account' | 'expense'
+function openListModal(mode, title, fieldsHtml) {
+  listModalMode = mode;
+  document.getElementById('list-modal-title').textContent = title;
+  document.getElementById('list-modal-add-fields').innerHTML = fieldsHtml + '<button class="btn-login" onclick="listModalAdd()">追加</button>';
+  renderListModalItems();
+  document.getElementById('list-modal').style.display = 'flex';
+}
+function openAccountManager() {
+  openListModal('account', '📋 借方科目の追加・削除',
+    '<input type="text" id="list-modal-input-name" placeholder="科目名" style="flex:1;">' +
+    '<input type="text" id="list-modal-input-code" placeholder="コード（例: 1205-001）" style="flex:1;">');
+}
+function openExpenseCdManager() {
+  openListModal('expense', '📋 経費CDの追加・削除',
+    '<input type="text" id="list-modal-input-name" placeholder="名称（例：旅）" style="flex:1;">' +
+    '<input type="text" id="list-modal-input-code" placeholder="コード（例：1）" style="width:110px;">');
+}
+function closeListModal() {
+  document.getElementById('list-modal').style.display = 'none';
+  listModalMode = null;
+}
+function listModalItems() {
+  if (listModalMode === 'account') return { items: ACCOUNT_LIST, label: v => v.replace('\n', '　') };
+  return { items: expenseCdList, label: e => `${e.label}（${e.code}）` };
+}
+function renderListModalItems() {
+  const listEl = document.getElementById('list-modal-extra-list');
+  const { items, label } = listModalItems();
+  if (!items.length) { listEl.innerHTML = '<p style="color:#889; font-size:13px;">登録された項目はありません</p>'; return; }
+  listEl.innerHTML = items.map((v, i) => `
+    <div style="display:flex; align-items:center; gap:8px; padding:6px 2px; border-bottom:1px solid #eee;">
+      <span style="flex:1; font-size:14px;">${escapeHtml(label(v))}</span>
+      <button class="btn-cancel" style="padding:4px 12px;" onclick="listModalRemove(${i})">削除</button>
+    </div>`).join('');
+}
+function listModalAdd() {
+  const nameEl = document.getElementById('list-modal-input-name');
+  const codeEl = document.getElementById('list-modal-input-code');
+  const name = nameEl.value.trim();
+  const code = codeEl.value.trim();
+  if (listModalMode === 'account') {
+    if (!name) { alert('科目名を入力してください。'); return; }
+    const v = code ? `${name}\n${code}` : name;
+    if (ACCOUNT_LIST.includes(v)) { alert('既にリストにあります。'); return; }
+    ACCOUNT_LIST.push(v);
+    const removedIdx = ACCOUNT_REMOVED.indexOf(v);
+    if (removedIdx >= 0) { ACCOUNT_REMOVED.splice(removedIdx, 1); saveStoredList(ACCOUNT_REMOVED_KEY, ACCOUNT_REMOVED); }
+    else { ACCOUNT_EXTRA.push(v); saveStoredList(ACCOUNT_EXTRA_KEY, ACCOUNT_EXTRA); }
+    ensureAccountOption(document.getElementById('account'), v);
+  } else {
+    if (!name || !code) { alert('名称とコードの両方を入力してください。'); return; }
+    if (expenseCdList.some(e => e.code === code)) { alert('そのコードは既にリストにあります。'); return; }
+    expenseCdList.push({ label: name, code });
+    saveStoredList(EXPENSE_CD_KEY, expenseCdList);
+    refreshAllExpenseCdSelects();
+  }
+  nameEl.value = ''; codeEl.value = '';
+  renderListModalItems();
+}
+function listModalRemove(i) {
+  const { items, label } = listModalItems();
+  if (!confirm(`「${label(items[i])}」を削除しますか？`)) return;
+  if (listModalMode === 'account') {
+    const v = ACCOUNT_LIST.splice(i, 1)[0];
+    const extraIdx = ACCOUNT_EXTRA.indexOf(v);
+    if (extraIdx >= 0) { ACCOUNT_EXTRA.splice(extraIdx, 1); saveStoredList(ACCOUNT_EXTRA_KEY, ACCOUNT_EXTRA); }
+    else { ACCOUNT_REMOVED.push(v); saveStoredList(ACCOUNT_REMOVED_KEY, ACCOUNT_REMOVED); }
+    const sel = document.getElementById('account');
+    if (sel.value !== v) { const opt = Array.from(sel.options).find(o => o.value === v); if (opt) opt.remove(); } // 選んでいる科目は残す
+  } else {
+    expenseCdList.splice(i, 1);
+    saveStoredList(EXPENSE_CD_KEY, expenseCdList);
+    refreshAllExpenseCdSelects();
+  }
+  renderListModalItems();
+}
+document.getElementById('list-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeListModal();
+});
+
+// ─── 行生成 ──────────────────────────────────────────────────
+const fareTbody = document.getElementById('fare-tbody');
+for (let i = 0; i < FARE_ROWS; i++) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td class="row-no">${i + 1}</td>
+    <td><input type="number" id="fare_month_${i}" min="1" max="12" placeholder=""></td>
+    <td><input type="number" id="fare_day_${i}" min="1" max="31" placeholder=""></td>
+    <td><input type="text" id="fare_summary_${i}" placeholder=""></td>
+    <td class="amount-cell"><input type="number" id="fare_amount_${i}" placeholder="0" min="0" step="1" oninput="updateTotals()"></td>
+    <td data-acc><select class="tax-select" id="expense_cd_${i}">${expenseCdOptionsHtml('')}</select></td>
+  `;
+  fareTbody.appendChild(tr);
+}
+const kindTbody = document.getElementById('kind-tbody');
+KINDS.forEach((name, i) => {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    ${name ? `<td class="kind-label">${name}</td>` : `<td><input type="text" id="kind_name_4" placeholder="その他（種別を入力）"></td>`}
+    <td><input type="number" id="kind_days_${i}" placeholder="" min="0" step="1" oninput="updateTotals()"></td>
+    <td><input type="number" id="kind_unit_${i}" placeholder="" min="0" step="1" oninput="updateTotals()"></td>
+    <td class="calc" id="kind_amount_${i}"></td>
+  `;
+  kindTbody.appendChild(tr);
+});
+
+// ─── 発行日デフォルト値（未入力時は今日の日付） ────────────────
+function setDefaultIssueDate() {
+  const y = document.getElementById('issue_year');
+  const m = document.getElementById('issue_month');
+  const d = document.getElementById('issue_day');
+  if (!y.value && !m.value && !d.value) {
+    const now = new Date();
+    y.value = now.getFullYear();
+    m.value = now.getMonth() + 1;
+    d.value = now.getDate();
+  }
+}
+setDefaultIssueDate();
+
+// ─── 合計計算 ────────────────────────────────────────────────
+function num(id) { return Math.max(0, parseFloat(document.getElementById(id)?.value) || 0); }
+function fareOf(i) { return Math.round(num(`fare_amount_${i}`)); }
+function kindAmountOf(i) { return Math.round(num(`kind_days_${i}`) * num(`kind_unit_${i}`)); }
+function yen(n) { return '￥' + n.toLocaleString('ja-JP'); }
+function computeTotals() {
+  let fare = 0, kinds = 0;
+  for (let i = 0; i < FARE_ROWS; i++) fare += fareOf(i);
+  for (let i = 0; i < KINDS.length; i++) kinds += kindAmountOf(i);
+  return { fare, kinds, grand: fare + kinds };
+}
+function updateTotals() {
+  for (let i = 0; i < KINDS.length; i++) {
+    const a = kindAmountOf(i);
+    document.getElementById(`kind_amount_${i}`).textContent = a ? yen(a) : '';
+  }
+  const t = computeTotals();
+  document.getElementById('fare-total').textContent = yen(t.fare);
+  document.getElementById('kind-total').textContent = yen(t.kinds);
+  document.getElementById('grand-total').textContent = yen(t.grand);
+  return t;
+}
+
+// ─── フォームクリア ──────────────────────────────────────────
+function clearForm() {
+  if (!confirm('入力内容をすべてクリアしますか？')) return;
+  document.querySelectorAll('.container input, .container select, .container textarea').forEach(el => {
+    if (el.type === 'file' || el.type === 'radio' || el.type === 'checkbox') return;
+    el.value = '';
+  });
+  document.getElementById('stamp_enabled').checked = true;
+  document.querySelector('input[name="stamp_color"][value="black"]').checked = true;
+  attachedFiles = [];
+  renderAttachedFileList();
+  renderAccountDisplay('account');
+  setDefaultIssueDate();
+  updateTotals();
+  redrawStampPreview();
+}
+
+// ─── 入力データの保存・読み込み ────────────────────────────
+function collectFormData() {
+  const data = { __app: 'travel-slip', __attachedFiles: attachedFiles };
+  document.querySelectorAll('.container input, .container select, .container textarea').forEach(el => {
+    if (!el.id || el.type === 'file') return;
+    data[el.id] = (el.type === 'checkbox') ? el.checked : el.value;
+  });
+  data.__stampColor = getStampColor();
+  return data;
+}
+
+function applyFormData(data) {
+  Object.entries(data).forEach(([id, val]) => {
+    if (id.startsWith('__')) return;
+    const el = document.getElementById(id);
+    if (!el || el.type === 'file') return;
+    if (el.type === 'checkbox') { el.checked = !!val; return; }
+    if (el.classList.contains('account-select')) ensureAccountOption(el, val);
+    if (id.startsWith('expense_cd_')) el.innerHTML = expenseCdOptionsHtml(val);
+    el.value = val;
+  });
+  const color = document.querySelector(`input[name="stamp_color"][value="${data.__stampColor || 'black'}"]`);
+  if (color) color.checked = true;
+  attachedFiles = Array.isArray(data.__attachedFiles) ? data.__attachedFiles : [];
+  renderAttachedFileList();
+  renderAccountDisplay('account');
+  updateTotals();
+  redrawStampPreview();
+}
+
+// 保存・PDF出力時のファイル名候補: 出張旅費伝票_発行日(YYMMDD)_出張者の苗字（未入力の部分は省略）
+function fileNameDate() {
+  const y = v('issue_year'), m = v('issue_month'), d = v('issue_day');
+  const pad2 = (n) => String(n).padStart(2, '0');
+  if (y && m && d) return pad2(Number(y) % 100) + pad2(m) + pad2(d);
+  const t = new Date();
+  return pad2(t.getFullYear() % 100) + pad2(t.getMonth() + 1) + pad2(t.getDate());
+}
+function fileNameSafe(str) {
+  return String(str || '').replace(/[\\/:*?"<>|\r\n\t]/g, '').trim();
+}
+function fileNameSei() {
+  return fileNameSafe(v('issuer').split(/[\s　]+/).filter(Boolean)[0] || '');
+}
+function buildFileBaseName() {
+  return ['出張旅費伝票', fileNameDate(), fileNameSei()].filter(Boolean).join('_');
+}
+
+async function saveData() {
+  const json = JSON.stringify(collectFormData(), null, 2);
+  const filename = `${buildFileBaseName()}.json`;
+  try {
+    if (window.showSaveFilePicker) {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(json);
+      await writable.close();
+    } else {
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') alert('保存に失敗しました: ' + e.message);
+  }
+}
+
+async function loadData() {
+  try {
+    let file;
+    if (window.showOpenFilePicker) {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }]
+      });
+      file = await handle.getFile();
+    } else {
+      file = await new Promise((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.onchange = () => resolve(input.files[0]);
+        input.click();
+      });
+    }
+    if (!file) return;
+    const data = JSON.parse(await file.text());
+    if (data.__app && data.__app !== 'travel-slip') {
+      alert('出張旅費伝票アプリで保存したファイルではありません。');
+      return;
+    }
+    applyFormData(data);
+  } catch (e) {
+    if (e.name !== 'AbortError') alert('読み込みに失敗しました: ' + e.message);
+  }
+}
+
+// ─── 控え選択モーダル（PDF出力・印刷の両方で共用） ──────────
+function exportProblems() {
+  const msgs = [];
+  const over = n => String(n).length > MAX_DIGITS;
+  for (let i = 0; i < FARE_ROWS; i++) if (over(fareOf(i))) msgs.push(`交通費の${i + 1}行目が6桁を超えています。`);
+  for (let i = 0; i < KINDS.length; i++) if (over(kindAmountOf(i))) msgs.push(`${KINDS[i] || v('kind_name_4') || 'その他'}の金額が6桁を超えています。`);
+  const t = updateTotals();
+  if (over(t.fare)) msgs.push('交通費の計が6桁を超えています。');
+  if (over(t.kinds)) msgs.push('小計が6桁を超えています。');
+  if (over(t.grand)) msgs.push('合計金額が6桁を超えています。');
+  if (getStampEnabled() && v('issuer') && !splitIssuerName(v('issuer'))) msgs.push('出張者名は苗字と名前の間にスペースを入れて入力してください（例：佐藤 太郎）。');
+  return msgs;
+}
+let pendingExportMode = 'download';
+function openExportModal(mode) {
+  const problems = exportProblems();
+  if (problems.length) { setStatus(problems.join(' '), true); alert(problems.join('\n')); return; }
+  pendingExportMode = mode || 'download';
+  document.getElementById('export-modal-title').textContent = pendingExportMode === 'print' ? '🖨 印刷' : '📄 PDF出力';
+  document.getElementById('export-modal-confirm-btn').textContent = pendingExportMode === 'print' ? '印刷' : 'PDF生成';
+  document.getElementById('export-copy-no').checked = true;
+  document.getElementById('export-modal').style.display = 'flex';
+}
+function closeExportModal() {
+  document.getElementById('export-modal').style.display = 'none';
+}
+function confirmExport() {
+  const withCopy = document.getElementById('export-copy-yes').checked;
+  closeExportModal();
+  generatePDF(withCopy, pendingExportMode);
+}
+
+// ─── 印刷（PDFをダウンロードせず、その場で印刷ダイアログを開く） ──
+function printPDF() {
+  openExportModal('print');
+}
+// Chrome内蔵のPDFビューア（iframeにPDFを読み込む方式）はwindow.print()を
+// 呼んでも反応しないことがあるため、PDFを画像化してページ自体を印刷する。
+let pdfjsWorkerConfigured = false;
+async function printViaCanvas(pdfBytes, title) {
+  if (!pdfjsWorkerConfigured) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js';
+    pdfjsWorkerConfigured = true;
+  }
+  const pdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
+  const printArea = document.getElementById('print-area');
+  printArea.innerHTML = '';
+  const scale = 300 / 72; // 300dpi相当（144dpiでは印刷がぼやけたため）
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    // 用紙(A4縦)に実寸で。添付PDFがA4より大きい・横長などの場合は縦横比を保って用紙に収める
+    const base = page.getViewport({ scale: 1 });
+    const wMm = base.width / 72 * 25.4, hMm = base.height / 72 * 25.4;
+    const fit = Math.min(1, 210 / wMm, 296.8 / hMm);
+    canvas.style.width = (wMm * fit) + 'mm';
+    canvas.style.height = (hMm * fit) + 'mm';
+    printArea.appendChild(canvas);
+  }
+  // 印刷ダイアログの「PDFに保存」はページのタイトルをファイル名の候補にするため、印刷中だけ差し替える
+  const prevTitle = document.title;
+  if (title) {
+    document.title = title;
+    window.addEventListener('afterprint', () => { document.title = prevTitle; }, { once: true });
+  }
+  window.print();
+}
+
+// ─── PDF生成 ─────────────────────────────────────────────────
+async function buildPdfBytes(withCopy, statusEl) {
+  const pdfBytes = Uint8Array.from(atob(TEMPLATE_B64), c => c.charCodeAt(0));
+  const { PDFDocument } = PDFLib;
+
+  const a4Doc = await PDFDocument.create();
+  a4Doc.registerFontkit(fontkit);
+
+  let jpFont, asciiFont;
+  // 英数字はPDF標準フォントHelveticaを使用する。幅情報が固定・正確なため数字類に向く。
+  asciiFont = await a4Doc.embedFont(PDFLib.StandardFonts.Helvetica);
+  try {
+    // 日本語は他の伝票アプリと同じ静的TTF(M PLUS 1p)を使用（可変フォントは幅計測が不安定なため使わない）
+    const fontResp = await fetch('https://raw.githubusercontent.com/google/fonts/main/ofl/mplus1p/MPLUS1p-Regular.ttf');
+    if (!fontResp.ok) throw new Error('font fetch failed');
+    jpFont = await a4Doc.embedFont(await fontResp.arrayBuffer());
+  } catch (e) {
+    jpFont = asciiFont;
+    if (statusEl) statusEl.textContent = '⚠ 日本語フォント取得失敗。英数字のみ正常に出力されます。';
+  }
+
+  const isAsciiCh = (ch) => ch.codePointAt(0) < 0x250;
+  const splitRuns = (str) => {
+    const runs = [];
+    let curAscii = null, cur = '';
+    for (const ch of str) {
+      const a = isAsciiCh(ch);
+      if (a !== curAscii) { if (cur) runs.push({ ascii: curAscii, text: cur }); curAscii = a; cur = ch; }
+      else cur += ch;
+    }
+    if (cur) runs.push({ ascii: curAscii, text: cur });
+    return runs;
+  };
+  const fontForRun = (run) => run.ascii ? asciiFont : jpFont;
+
+  const [templatePage] = await a4Doc.embedPdf(pdfBytes);
+
+  const A4_W = 595.32, A4_H = 841.92;
+  const A5_W = 595.32, A5_H = 419.52;
+  const fs = 10.5;
+  const LINE_GAP = 1.15;
+  const measureForm = (str, formSize) => {
+    const pageSize = formSize * 0.75;
+    let w = 0;
+    for (const run of splitRuns(str)) w += fontForRun(run).widthOfTextAtSize(run.text, pageSize);
+    return w / 0.75;
+  };
+  const wrapLines = (str, formSize, maxWidth) => {
+    const lines = [];
+    let cur = '';
+    for (const ch of str) {
+      const test = cur + ch;
+      if (cur && measureForm(test, formSize) > maxWidth) { lines.push(cur); cur = ch; }
+      else cur = test;
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  };
+  const wrapLinesMulti = (str, formSize, maxWidth) => {
+    let result = [];
+    for (const seg of str.split('\n')) {
+      result = result.concat(measureForm(seg, formSize) > maxWidth ? wrapLines(seg, formSize, maxWidth) : [seg]);
+    }
+    return result;
+  };
+
+  const drawAt = (a4Page, yOffset) => {
+    const drawRunsAt = (str, xPagePt, yPagePt, pageSize) => {
+      let x = xPagePt;
+      for (const run of splitRuns(str)) {
+        const f = fontForRun(run);
+        a4Page.drawText(run.text, { x, y: yPagePt, size: pageSize, font: f, color: PDFLib.rgb(0,0,0) });
+        x += f.widthOfTextAtSize(run.text, pageSize);
+      }
+    };
+    const draw = (text, xForm, yForm, maxWidth, size) => {
+      if (!text) return;
+      const str = String(text);
+      let sz = size || fs;
+      if (maxWidth) { while (measureForm(str, sz) > maxWidth && sz > 5) sz -= 0.5; }
+      drawRunsAt(str, 0.75 * xForm, yOffset + A5_H - 0.75 * yForm, sz * 0.75);
+    };
+    const drawInCell = (text, xForm, yTop, yBottom, maxWidth, size, align) => {
+      if (!text) return;
+      const str = String(text);
+      const cellHeight = yBottom - yTop;
+      let sz = size || fs;
+      let lines = wrapLinesMulti(str, sz, maxWidth);
+      while (lines.length * sz * LINE_GAP > cellHeight && sz > 5) {
+        sz -= 0.5;
+        lines = wrapLinesMulti(str, sz, maxWidth);
+      }
+      const blockHeight = lines.length * sz * LINE_GAP;
+      let baseline = (yTop + yBottom) / 2 - blockHeight / 2 + sz * 0.8;
+      for (const line of lines) {
+        let xF = xForm;
+        if (align === 'right') xF = xForm + (maxWidth - measureForm(line, sz));
+        else if (align === 'center') xF = xForm + (maxWidth - measureForm(line, sz)) / 2;
+        drawRunsAt(line, 0.75 * xF, yOffset + A5_H - 0.75 * baseline, sz * 0.75);
+        baseline += sz * LINE_GAP;
+      }
+    };
+    const drawInBox = (text, x, x2, yTop, yBottom, pad, align, size) =>
+      drawInCell(text, x + pad, yTop, yBottom, (x2 - x) - pad * 2, size || null, align);
+    const drawCenteredChar = (ch, xFormCenter, yTop, yBottom, size) => {
+      if (!ch) return;
+      const sz = size || fs;
+      const baseline = (yTop + yBottom) / 2 + sz * 0.35;
+      const xF = xFormCenter - measureForm(ch, sz) / 2;
+      drawRunsAt(ch, 0.75 * xF, yOffset + A5_H - 0.75 * baseline, sz * 0.75);
+    };
+    // 金額を桁マスに右から1桁ずつ。withYen なら最上位桁の左隣の空きマスに￥
+    const drawDigits = (amount, cellsX, yTop, yBottom, withYen) => {
+      const digits = String(amount).split('').reverse();
+      for (let d = 0; d < Math.min(digits.length, cellsX.length); d++) drawCenteredChar(digits[d], cellsX[d], yTop, yBottom, 11.5);
+      if (withYen && digits.length < cellsX.length) drawCenteredChar('￥', cellsX[digits.length], yTop, yBottom, 11.5);
+    };
+
+    // ─ ヘッダー ─
+    draw(v('office_name'), OFFICE_NAME_POS.x, OFFICE_NAME_POS.y, OFFICE_NAME_POS.w, 12);
+    for (const key of ['date_year', 'date_month', 'date_day']) {
+      drawInCell(v(key), DATE_POS[key].x, DATE_CELL_Y[0] - 2, DATE_CELL_Y[1] + 2, DATE_POS[key].w, 13, key === 'date_year' ? 'right' : 'center');
+    }
+    const [hbTop, hbBottom] = HEADER_BOX_Y;
+    drawInBox(v('account'),     HEADER_BOX_X.account.x,     HEADER_BOX_X.account.x2,     hbTop, hbBottom, 4, 'center');
+    drawInBox(v('tax'),         HEADER_BOX_X.tax.x,         HEADER_BOX_X.tax.x2,         hbTop, hbBottom, 1, 'center');
+    drawInBox(v('job_no'),      HEADER_BOX_X.job_no.x,      HEADER_BOX_X.job_no.x2,      hbTop, hbBottom, 3, 'center');
+    drawInBox(toHalfWidthAlnum(v('category')), HEADER_BOX_X.category.x, HEADER_BOX_X.category.x2, hbTop, hbBottom, 3, 'center');
+    drawInBox(v('office_code'), HEADER_BOX_X.office_code.x, HEADER_BOX_X.office_code.x2, hbTop, hbBottom, 3, 'center');
+    drawInBox(v('voucher_no'),  HEADER_BOX_X.voucher_no.x,  HEADER_BOX_X.voucher_no.x2,  hbTop, hbBottom, 4, 'center');
+    drawInBox(v('subject'),     SUBJECT_BOX.x,     SUBJECT_BOX.x2,     SUBJECT_BOX.yTop,     SUBJECT_BOX.yBottom,     4, null, 11);
+    drawInBox(v('destination'), DESTINATION_BOX.x, DESTINATION_BOX.x2, DESTINATION_BOX.yTop, DESTINATION_BOX.yBottom, 4, null, 11);
+
+    // ─ 左：交通費の明細（1〜5行目）と計（6行目） ─
+    const cell = (key, text, yTop, yBottom, align, pad = 3) => {
+      const c = COL_X[key];
+      drawInCell(text, c.x + pad, yTop, yBottom, c.w - pad * 2, null, align);
+    };
+    for (let i = 0; i < FARE_ROWS; i++) {
+      const [yTop, yBottom] = ROW_BOUNDS[i];
+      cell('month', gv(`fare_month_${i}`), yTop, yBottom, 'center', 1);
+      cell('day',   gv(`fare_day_${i}`),   yTop, yBottom, 'center', 1);
+      cell('summary', gv(`fare_summary_${i}`), yTop, yBottom);
+      cell('expense_cd', expenseCdLabel(gv(`expense_cd_${i}`)), yTop, yBottom, 'center', 2);
+      const f = fareOf(i);
+      if (f > 0) drawDigits(f, FARE_CELLS_X, yTop, yBottom, false);
+    }
+    const t = computeTotals();
+    {
+      const [yTop, yBottom] = ROW_BOUNDS[5];
+      if (t.fare > 0) {
+        cell('summary', '交通費 計', yTop, yBottom, 'right', 6);
+        drawDigits(t.fare, FARE_CELLS_X, yTop, yBottom, true);
+      }
+    }
+
+    // ─ 右：宿泊費・車中泊・日当・日帰出張・その他（日数×単価）と小計 ─
+    for (let i = 0; i < KINDS.length; i++) {
+      const [yTop, yBottom] = ROW_BOUNDS[i];
+      if (!KINDS[i]) cell('kind', v('kind_name_4'), yTop, yBottom, 'center', 3);
+      const days = gv(`kind_days_${i}`), unit = gv(`kind_unit_${i}`);
+      if (days) cell('days', days, yTop, yBottom, 'center', 2);
+      if (unit) cell('unit', Number(unit).toLocaleString('ja-JP'), yTop, yBottom, 'right', 4);
+      const a = kindAmountOf(i);
+      if (a > 0) drawDigits(a, AMOUNT_CELLS_X, yTop, yBottom, false);
+    }
+    if (t.kinds > 0) drawDigits(t.kinds, AMOUNT_CELLS_X, ROW_BOUNDS[5][0], ROW_BOUNDS[5][1], true);
+    // ─ 合計金額（交通費 計＋小計） ─
+    if (t.grand > 0) drawDigits(t.grand, AMOUNT_CELLS_X, TOTAL_ROW_BOUNDS[0], TOTAL_ROW_BOUNDS[1], true);
+
+    // ─ 発行日・社員CD・部課・資格・出張者 ─
+    for (const key of ['issue_year', 'issue_month', 'issue_day']) {
+      drawInCell(v(key), ISSUE_POS[key].x, ISSUE_CELL_Y[0] - 2, ISSUE_CELL_Y[1] + 2, ISSUE_POS[key].w, 13, key === 'issue_year' ? 'right' : 'center');
+    }
+    const emp = v('employee_cd');
+    for (let c = 0; c < Math.min(emp.length, EMPLOYEE_CD_CELLS_X.length); c++) {
+      drawCenteredChar(emp[c], EMPLOYEE_CD_CELLS_X[c], EMPLOYEE_CD_BOUNDS[0], EMPLOYEE_CD_BOUNDS[1], 12);
+    }
+    drawInCell(v('dept'),    DEPT_POS.x,    DEPT_CELL_Y[0], DEPT_CELL_Y[1], DEPT_POS.w,    null, 'right');
+    drawInCell(v('section'), SECTION_POS.x, DEPT_CELL_Y[0], DEPT_CELL_Y[1], SECTION_POS.w, null, 'right');
+    drawInCell(v('grade'),   GRADE_POS.x,   DEPT_CELL_Y[0], DEPT_CELL_Y[1], GRADE_POS.w,   null, 'center');
+    draw(v('issuer'), ISSUER_POS.x, ISSUER_POS.y, ISSUER_POS.w, 14);
+
+    // ─ 出張者印（デート印） ─
+    const issuerParsed = splitIssuerName(v('issuer'));
+    if (getStampEnabled() && issuerParsed) {
+      DateStamp.drawToPdf(a4Page, STAMP_ISSUER_CENTER.x, yOffset + STAMP_ISSUER_CENTER.y, {
+        ...stampNameOptions(issuerParsed.sei, v('issuer_title')),
+        date: getIssueDateForStamp(),
+        dateFormat: 'yy-slash',
+        color: getStampColor(),
+        radius: STAMP_RADIUS,
+        font: jpFont
+      });
+    }
+  };
+
+  // ─ A4配置 ─
+  // 印字範囲（SLIP_CONTENT）が高さ約397ptで、A4の半分(421pt)に余白付きで収まるため、縮小せず実寸(100%)で配置する
+  // （入金伝票アプリと同じ方式）。印字範囲から用紙端までを SLIP_EDGE 空ける。左右は印字範囲を中央に。
+  const SLIP_SCALE = 1.0;
+  const SLIP_CONTENT = { left: 25.2, top: 10.8, right: 582.0, bottom: 407.5 }; // テンプレートの印字範囲（pt、上端・左端から。実測）
+  const SLIP_EDGE = 14.2; // pt（5mm）
+  const slipTx = (A4_W - SLIP_SCALE * (SLIP_CONTENT.left + SLIP_CONTENT.right)) / 2;
+  const slipTy = (yOffset) => yOffset > 0
+    ? A4_H - SLIP_EDGE + SLIP_SCALE * SLIP_CONTENT.top - SLIP_SCALE * A4_H
+    : SLIP_EDGE - SLIP_SCALE * (A5_H - SLIP_CONTENT.bottom);
+  const slots = withCopy ? [A4_H - A5_H, 0] : [A4_H - A5_H];
+  const a4Page = a4Doc.addPage([A4_W, A4_H]);
+  for (const yOffset of slots) {
+    a4Page.pushOperators(
+      PDFLib.pushGraphicsState(),
+      PDFLib.concatTransformationMatrix(SLIP_SCALE, 0, 0, SLIP_SCALE, slipTx, slipTy(yOffset))
+    );
+    a4Page.drawPage(templatePage, { x: 0, y: yOffset, width: A5_W, height: A5_H });
+    drawAt(a4Page, yOffset);
+    a4Page.pushOperators(PDFLib.popGraphicsState());
+  }
+
+  // ─ A4中央に切取り線 ─
+  {
+    const cutY = A4_H - A5_H;
+    const cutClr = PDFLib.rgb(0.5, 0.5, 0.5);
+    const cutLabel = '切取り';
+    const cutLabelSize = 7.5;
+    const cutLabelW = jpFont.widthOfTextAtSize(cutLabel, cutLabelSize);
+    const cutLabelX = (A4_W - cutLabelW) / 2;
+    const dashLen = 9, dashGap = 5;
+    let cx = 4;
+    while (cx < cutLabelX - 6) {
+      const ex = Math.min(cx + dashLen, cutLabelX - 6);
+      a4Page.drawLine({ start: { x: cx, y: cutY }, end: { x: ex, y: cutY }, thickness: 0.5, color: cutClr });
+      cx = ex + dashGap;
+    }
+    a4Page.drawText(cutLabel, { x: cutLabelX, y: cutY - cutLabelSize * 0.4, size: cutLabelSize, font: jpFont, color: cutClr });
+    cx = cutLabelX + cutLabelW + 6;
+    while (cx < A4_W - 4) {
+      const ex = Math.min(cx + dashLen, A4_W - 4);
+      a4Page.drawLine({ start: { x: cx, y: cutY }, end: { x: ex, y: cutY }, thickness: 0.5, color: cutClr });
+      cx = ex + dashGap;
+    }
+  }
+
+  // ─ 添付ファイル: PDFページを後ろに結合 ─
+  const attachMergeWarnings = [];
+  for (const f of attachedFiles) {
+    try {
+      const attachBytes = Uint8Array.from(atob(f.dataUrl.split(',')[1]), c => c.charCodeAt(0));
+      const attachDoc = await PDFDocument.load(attachBytes);
+      const copiedPages = await a4Doc.copyPages(attachDoc, attachDoc.getPageIndices());
+      copiedPages.forEach(page => a4Doc.addPage(page));
+    } catch (e) {
+      attachMergeWarnings.push(f.name);
+    }
+  }
+  const warning = attachMergeWarnings.length ? `（添付ファイルの結合に失敗: ${attachMergeWarnings.join(', ')}）` : '';
+  return { bytes: await a4Doc.save(), warning };
+}
+
+async function generatePDF(withCopy, mode = 'download') {
+  const statusEl = document.getElementById('status');
+  statusEl.textContent = 'PDFを生成中...';
+  statusEl.className = '';
+  try {
+    const { bytes, warning } = await buildPdfBytes(withCopy, statusEl);
+    if (mode === 'print') {
+      await printViaCanvas(bytes, buildFileBaseName());
+      statusEl.textContent = '印刷ダイアログを開きました' + warning;
+    } else {
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${buildFileBaseName()}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      statusEl.textContent = 'PDF出力完了！' + warning;
+    }
+    statusEl.className = warning ? 'status-err' : 'status-ok';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'エラー: ' + err.message;
+    statusEl.className = 'status-err';
+  }
+}
+
+function setStatus(msg, isErr) {
+  const st = document.getElementById('status');
+  st.textContent = msg;
+  st.className = isErr ? 'status-err' : '';
+}
+
+// ─── 添付ファイル ────────────────────────────────────────────
+let attachedFiles = []; // [{ name, dataUrl }]
+function onAttachedFilesSelected(input) {
+  const files = Array.from(input.files || []);
+  input.value = '';
+  files.forEach(file => {
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (!isPdf) { alert(`「${file.name}」はPDFファイルではないためスキップしました。`); return; }
+    const reader = new FileReader();
+    reader.onload = () => { attachedFiles.push({ name: file.name, dataUrl: reader.result }); renderAttachedFileList(); };
+    reader.onerror = () => alert(`「${file.name}」の読み込みに失敗しました。`);
+    reader.readAsDataURL(file);
+  });
+}
+function removeAttachedFileAt(idx) {
+  attachedFiles.splice(idx, 1);
+  renderAttachedFileList();
+}
+function viewAttachedFile(idx) {
+  const f = attachedFiles[idx];
+  if (!f) return;
+  // data: URLを直接window.openに渡すと空タブになるため、blob: URLに変換してから開く
+  const bytes = Uint8Array.from(atob(f.dataUrl.split(',')[1]), c => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  const win = window.open(url, '_blank');
+  if (!win) alert('ポップアップがブロックされました。ブラウザの設定を確認してください。');
+}
+function renderAttachedFileList() {
+  const container = document.getElementById('attached-file-list');
+  container.innerHTML = attachedFiles.map((f, idx) => `
+    <div style="display:flex; align-items:center; gap:8px; padding:6px 2px; border-bottom:1px solid #eee; font-size:13px;">
+      <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">📄 ${escapeHtml(f.name)}</span>
+      <button type="button" class="btn-file" onclick="viewAttachedFile(${idx})">👁 表示</button>
+      <button type="button" class="btn-file btn-file-del" onclick="removeAttachedFileAt(${idx})">🗑 削除</button>
+    </div>
+  `).join('');
+}
+
+// ─── ユーティリティ ──────────────────────────────────────────
+function v(id)  { return (document.getElementById(id)?.value || '').trim(); }
+function gv(id) { return (document.getElementById(id)?.value || '').trim(); }
+
+// ─── 出張者印（デート印）プレビュー ─────────────────────────
+const stampCtx = document.getElementById('stamp-preview').getContext('2d');
+// 課長以下は黒、工事長以上は赤がデフォルト
+const TITLE_DEFAULT_COLOR = { '': 'black', '副長': 'black', '課長': 'black', '工事長': 'red', '支店長': 'red', '部長': 'red', '本部長': 'red', '取締役': 'red', '常務': 'red', '本店長': 'red' };
+function splitIssuerName(str) {
+  const parts = String(str || '').split(/[ 　]+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  return { sei: parts[0], mei: parts.slice(1).join(' ') };
+}
+// 役職なし：苗字を上下に分割／役職あり：上に苗字、下に役職。支店長は上段に事業所名（「支店」を除く）
+function stampNameOptions(sei, title) {
+  if (title === '支店長') {
+    const office = v('office_name').replace(/支店$/, '');
+    return { nameTop: office, nameBottom: title };
+  }
+  return title ? { nameTop: sei, nameBottom: title } : { name: sei };
+}
+function getStampColor() {
+  const el = document.querySelector('input[name="stamp_color"]:checked');
+  return el ? el.value : 'black';
+}
+function getStampEnabled() {
+  const el = document.getElementById('stamp_enabled');
+  return el ? el.checked : true;
+}
+function getIssueDateForStamp() {
+  const y = parseInt(v('issue_year'));
+  const m = parseInt(v('issue_month'));
+  const d = parseInt(v('issue_day'));
+  if (y && m && d) return { year: y, month: m, day: d };
+  return new Date();
+}
+function onIssuerTitleChange() {
+  const color = TITLE_DEFAULT_COLOR[v('issuer_title')] || 'black';
+  const el = document.querySelector(`input[name="stamp_color"][value="${color}"]`);
+  if (el) el.checked = true;
+  redrawStampPreview();
+}
+function redrawStampPreview() {
+  const canvas = stampCtx.canvas;
+  stampCtx.clearRect(0, 0, canvas.width, canvas.height);
+  const errEl = document.getElementById('issuer-name-error');
+  if (!getStampEnabled()) { errEl.style.display = 'none'; return; }
+  const raw = v('issuer');
+  if (!raw) { errEl.style.display = 'none'; return; }
+  const parsed = splitIssuerName(raw);
+  if (!parsed) { errEl.style.display = 'block'; return; }
+  errEl.style.display = 'none';
+  DateStamp.draw(stampCtx, canvas.width / 2, canvas.height / 2, {
+    ...stampNameOptions(parsed.sei, v('issuer_title')),
+    date: getIssueDateForStamp(), dateFormat: 'yy-slash', color: getStampColor(), radius: 36
+  });
+}
+document.getElementById('issuer').addEventListener('input', redrawStampPreview);
+['issue_year','issue_month','issue_day'].forEach(id => document.getElementById(id).addEventListener('input', redrawStampPreview));
+document.querySelectorAll('input[name="stamp_color"]').forEach(el => el.addEventListener('change', redrawStampPreview));
+document.getElementById('stamp_enabled').addEventListener('change', redrawStampPreview);
+
+document.getElementById('export-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeExportModal();
+});
+
+// ─── 経理担当者認証 ─────────────────────────────────────────
+const ACC_PASS = 'acc';
+let accMode = false;
+function toggleAccMode() {
+  if (accMode) {
+    accMode = false;
+    document.body.classList.remove('acc-mode');
+    document.getElementById('acc-btn').textContent = '🔒 経理担当者';
+    document.getElementById('acc-status').textContent = '';
+  } else {
+    openAccModal();
+  }
+}
+function openAccModal() {
+  document.getElementById('acc-pw').value = '';
+  document.getElementById('acc-pw-error').style.display = 'none';
+  document.getElementById('acc-modal').style.display = 'flex';
+  setTimeout(function(){ document.getElementById('acc-pw').focus(); }, 30);
+}
+function closeAccModal() {
+  document.getElementById('acc-modal').style.display = 'none';
+}
+function loginAcc() {
+  if (document.getElementById('acc-pw').value === ACC_PASS) {
+    accMode = true;
+    document.body.classList.add('acc-mode');
+    document.getElementById('acc-btn').textContent = '🔓 経理担当者';
+    document.getElementById('acc-status').textContent = '● 経理モード';
+    closeAccModal();
+  } else {
+    document.getElementById('acc-pw-error').style.display = 'block';
+    document.getElementById('acc-pw').select();
+  }
+}
+document.getElementById('acc-pw').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') loginAcc();
+  if (e.key === 'Escape') closeAccModal();
+});
+document.getElementById('acc-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeAccModal();
+});
+
+updateTotals();
+</script>
+</body>
+</html>
