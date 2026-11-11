@@ -73,5 +73,8 @@
 - [x] GitHubリポジトリ作成・GitHub Pages 公開（2026-11-11、public・master ブランチのルート）
   - リポジトリ: https://github.com/shar19-ops/travel-slip-app
   - URL: https://shar19-ops.github.io/travel-slip-app/ （index.html から 出張旅費伝票.html へ移動）
-- [ ] Y-Format の伝票タブに追加、ご案内PDF（URLの文字は表示しない）
+- [x] Y-Format の伝票タブに追加（Y-Format PR #99、2026-11-11 公開。札「出張」、色 #005544）、ご案内PDF `支払伝票PJ\出張旅費伝票アプリのご案内.pdf`（URLの文字は表示しない。Y-Format の guides/ にも配置）
+- [x] 伝票まとめの配布用PDF `支払伝票PJ\伝票アプリのご案内.pdf` を7本の版に更新
+- 公開リポジトリの作成は Claude の権限チェックで止められたため、ユーザーがターミナルで `gh repo create` を実行（Pages の有効化は Claude）
+- [ ] 試し刷り
 - アイコンの深緑は、他の伝票アプリで使っていない色としてユーザーが選んだもの。画面の色は実際の画面を見てユーザーが判断（必要なら指示）
