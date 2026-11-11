@@ -70,4 +70,8 @@
 
 - [x] アイコン（2026-11-11。元画像 `MCフォルダ\アプリ用アイコン集\伝票\出張旅費.png` 392px から 512/192/180/48/32px を作成。512は拡大）
 - [ ] 試し刷り
-- [ ] GitHubリポジトリ作成・GitHub Pages 公開、Y-Format の伝票タブに追加、ご案内PDF
+- [x] GitHubリポジトリ作成・GitHub Pages 公開（2026-11-11、public・master ブランチのルート）
+  - リポジトリ: https://github.com/shar19-ops/travel-slip-app
+  - URL: https://shar19-ops.github.io/travel-slip-app/ （index.html から 出張旅費伝票.html へ移動）
+- [ ] Y-Format の伝票タブに追加、ご案内PDF（URLの文字は表示しない）
+- アイコンの深緑は、他の伝票アプリで使っていない色としてユーザーが選んだもの。画面の色は実際の画面を見てユーザーが判断（必要なら指示）
