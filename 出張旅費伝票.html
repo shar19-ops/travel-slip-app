@@ -329,8 +329,10 @@
 
   .form-row { display: flex; flex-wrap: wrap; align-items: end; gap: 16px 20px; padding: 16px; }
   .form-row + .form-row { padding-top: 0; }
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
-  @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+  /* 左（交通費）を広く、右（種別・日数・単価・金額）は中身の幅だけ（2026-11-11 ユーザー指定：摘要欄を広く） */
+  .two-col { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0; }
+  .two-col .kind-table { width: auto; }
+  @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } .two-col .kind-table { width: 100%; } }
 
   /* 印刷：PDFを画像化して#print-areaに描画し、それだけを印刷する */
   #print-area { display: none; }
@@ -400,7 +402,7 @@
 <div id="print-area"></div>
 
 <header>
-  <h1>出張旅費伝票 <span class="app-version">v20261111a</span></h1>
+  <h1>出張旅費伝票 <span class="app-version">v20261111b</span></h1>
   <span>入力フォーム</span>
   <div class="btn-bar">
     <button class="btn-secondary" onclick="loadData()">📂 読み込む</button>
@@ -520,8 +522,8 @@
           <thead>
             <tr>
               <th style="width:28px;">№</th>
-              <th style="width:54px;">月</th>
-              <th style="width:54px;">日</th>
+              <th style="width:46px;">月</th>
+              <th style="width:46px;">日</th>
               <th style="min-width:160px;">摘要（区間・交通機関など）</th>
               <th style="width:100px;">交通費</th>
               <th style="width:84px;">経費CD</th>
@@ -534,10 +536,10 @@
         </table>
       </div>
       <div class="detail-table-wrap">
-        <table class="detail">
+        <table class="detail kind-table">
           <thead>
             <tr>
-              <th style="min-width:110px;">種別</th>
+              <th style="width:104px;">種別</th>
               <th style="width:64px;">日数</th>
               <th style="width:96px;">単価</th>
               <th style="width:100px;">金額</th>
@@ -984,7 +986,7 @@ const kindTbody = document.getElementById('kind-tbody');
 KINDS.forEach((name, i) => {
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    ${name ? `<td class="kind-label">${name}</td>` : `<td><input type="text" id="kind_name_4" placeholder="その他（種別を入力）"></td>`}
+    ${name ? `<td class="kind-label">${name}</td>` : `<td><input type="text" id="kind_name_4" placeholder="その他"></td>`}
     <td><input type="number" id="kind_days_${i}" placeholder="" min="0" step="1" oninput="updateTotals()"></td>
     <td><input type="number" id="kind_unit_${i}" placeholder="" min="0" step="1" oninput="updateTotals()"></td>
     <td class="calc" id="kind_amount_${i}"></td>
