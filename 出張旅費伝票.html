@@ -402,7 +402,7 @@
 <div id="print-area"></div>
 
 <header>
-  <h1>出張旅費伝票 <span class="app-version">v20261112a</span></h1>
+  <h1>出張旅費伝票 <span class="app-version">v20261118a</span></h1>
   <span>入力フォーム</span>
   <div class="btn-bar">
     <button class="btn-secondary" onclick="loadData()">📂 読み込む</button>
@@ -977,7 +977,7 @@ for (let i = 0; i < FARE_ROWS; i++) {
     <td class="row-no">${i + 1}</td>
     <td><input type="number" id="fare_month_${i}" min="1" max="12" placeholder=""></td>
     <td><input type="number" id="fare_day_${i}" min="1" max="31" placeholder=""></td>
-    <td><input type="text" id="fare_summary_${i}" placeholder=""></td>
+    <td><textarea id="fare_summary_${i}" rows="2" placeholder=""></textarea></td>
     <td class="amount-cell"><input type="number" id="fare_amount_${i}" placeholder="0" min="0" step="1" oninput="updateTotals()"></td>
     <td data-acc><select class="tax-select" id="expense_cd_${i}">${expenseCdOptionsHtml('')}</select></td>
   `;
